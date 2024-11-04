@@ -58,10 +58,12 @@ def load_dependencies(optional=False):
 
 def dependency_check(optional=False):
     d = list()
+    dep_version_int = None
+    low_check = None
     deps = load_dependencies(optional)
     for dep in deps:
         try:
-            dep_version_int = [int(x) if x.isnumeric() else 0 for x in dep[0].split('.')]
+            dep_version_int = [int(x) if x.isnumeric() else 0 for x in dep[0].split('.')[:3]]
             low_check = [int(x) for x in dep[3].split('.')]
             high_check = [int(x) for x in dep[5].split('.')]
         except AttributeError:

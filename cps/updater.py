@@ -52,6 +52,8 @@ class Updater(threading.Thread):
 
     def __init__(self):
         threading.Thread.__init__(self)
+        self.web_server = None
+        self.config = None
         self.paused = False
         self.can_run = threading.Event()
         self.pause()
@@ -612,7 +614,7 @@ class Updater(threading.Thread):
         if version is False:
             status['current_commit_hash'] = _(u'Unknown')
         else:
-            status['current_commit_hash'] = version['version']
+            status['current_commit_hash'] = version
         try:
             headers = {'Accept': 'application/vnd.github.v3+json'}
             r = requests.get(repository_url, headers=headers, timeout=10)

@@ -18,7 +18,7 @@
 
 import os
 import re
-from glob import glob
+import glob
 from shutil import copyfile, copyfileobj
 from markupsafe import escape
 from time import time
@@ -39,14 +39,17 @@ from cps.file_helper import get_temp_dir
 from cps.tasks.mail import TaskEmail
 from cps import gdriveutils, helper
 from cps.constants import SUPPORTED_CALIBRE_BINARIES
+from cps.string_helper import strip_whitespaces
 
 log = logger.create()
 
 current_milli_time = lambda: int(round(time() * 1000))
 
+
 class TaskConvert(CalibreTask):
     def __init__(self, file_path, book_id, task_message, settings, ereader_mail, user=None):
         super(TaskConvert, self).__init__(task_message)
+        self.worker_thread = None
         self.file_path = file_path
         self.book_id = book_id
         self.title = ""
@@ -67,12 +70,13 @@ class TaskConvert(CalibreTask):
                                                      data.name + "." + self.settings['old_book_format'].lower())
             df_cover = gdriveutils.getFileFromEbooksFolder(cur_book.path, "cover.jpg")
             if df:
+                datafile_cover = None
                 datafile = os.path.join(config.get_book_path(),
                                         cur_book.path,
                                         data.name + "." + self.settings['old_book_format'].lower())
                 if df_cover:
                     datafile_cover = os.path.join(config.get_book_path(),
-                                            cur_book.path, "cover.jpg")
+                                                  cur_book.path, "cover.jpg")
                 if not os.path.exists(os.path.join(config.get_book_path(), cur_book.path)):
                     os.makedirs(os.path.join(config.get_book_path(), cur_book.path))
                 df.GetContentFile(datafile)
@@ -85,7 +89,7 @@ class TaskConvert(CalibreTask):
                                   format=self.settings['old_book_format'],
                                   fn=data.name + "." + self.settings['old_book_format'].lower())
                 worker_db.session.close()
-                return self._handleError(self, error_message)
+                return self._handleError(error_message)
 
         filename = self._convert_ebook_format()
         if config.config_use_google_drive:
@@ -102,17 +106,19 @@ class TaskConvert(CalibreTask):
                 # if we're sending to E-Reader after converting, create a one-off task and run it immediately
                 # todo: figure out how to incorporate this into the progress
                 try:
-                    EmailText = N_("%(book)s send to E-Reader", book=escape(self.title))
-                    worker_thread.add(self.user, TaskEmail(self.settings['subject'],
-                                                           self.results["path"],
-                                                           filename,
-                                                           self.settings,
-                                                           self.ereader_mail,
-                                                           EmailText,
-                                                           self.settings['body'],
-                                                           id=self.book_id,
-                                                           internal=True)
-                                      )
+                    EmailText = N_(u"%(book)s send to E-Reader", book=escape(self.title))                    
+                    for email in self.ereader_mail.split(','):
+                        email = strip_whitespaces(email)
+                        worker_thread.add(self.user, TaskEmail(self.settings['subject'],
+                                                               self.results["path"],
+                                                               filename,
+                                                               self.settings,
+                                                               email,
+                                                               EmailText,
+                                                               self.settings['body'],
+                                                               id=self.book_id,
+                                                               internal=True)
+                                          )
                 except Exception as ex:
                     return self._handleError(str(ex))
 
@@ -236,20 +242,21 @@ class TaskConvert(CalibreTask):
 
         # move file
         if check == 0:
-            converted_file = glob(os.path.splitext(filename)[0] + "*.kepub.epub")
+            converted_file = glob.glob(glob.escape(os.path.splitext(filename)[0]) + "*.kepub.epub")
             if len(converted_file) == 1:
                 copyfile(converted_file[0], (file_path + format_new_ext))
                 os.unlink(converted_file[0])
             else:
                 return 1, N_("Converted file not found or more than one file in folder %(folder)s",
-                            folder=os.path.dirname(file_path))
+                             folder=os.path.dirname(file_path))
         return check, None
 
     def _convert_calibre(self, file_path, format_old_ext, format_new_ext, has_cover):
+        path_tmp_opf = None
         try:
             # path_tmp_opf = self._embed_metadata()
             if config.config_embed_metadata:
-                quotes = [3, 5]
+                quotes = [5]
                 tmp_dir = get_temp_dir()
                 calibredb_binarypath = os.path.join(config.config_binariesdir, SUPPORTED_CALIBRE_BINARIES["calibredb"])
                 my_env = os.environ.copy()
@@ -261,27 +268,46 @@ class TaskConvert(CalibreTask):
 
                 opf_command = [calibredb_binarypath, 'show_metadata', '--as-opf', str(self.book_id),
                                '--with-library', library_path]
-                p = process_open(opf_command, quotes, my_env)
-                p.wait()
-                path_tmp_opf = os.path.join(tmp_dir, "metadata_" + str(uuid4()) + ".opf")
-                with open(path_tmp_opf, 'w') as fd:
-                    copyfileobj(p.stdout, fd)
-
-            quotes = [1, 2, 4, 6]
+                p = process_open(opf_command, quotes, my_env, newlines=False)
+                lines = list()
+                while p.poll() is None:
+                    lines.append(p.stdout.readline())
+                check = p.returncode
+                calibre_traceback = p.stderr.readlines()
+                if check == 0:
+                    path_tmp_opf = os.path.join(tmp_dir, "metadata_" + str(uuid4()) + ".opf")
+                    with open(path_tmp_opf, 'wb') as fd:
+                        fd.write(b''.join(lines))
+                else:
+                    error_message = ""
+                    for ele in calibre_traceback:
+                        if not ele.startswith('Traceback') and not ele.startswith('  File'):
+                            error_message = N_("Calibre failed with error: %(error)s", error=ele)
+                    return check, error_message
+            quotes = [1, 2]
+            quotes_index = 3
             command = [config.config_converterpath, (file_path + format_old_ext),
                        (file_path + format_new_ext)]
             if config.config_embed_metadata:
+                quotes.append(4)
+                quotes_index = 5
                 command.extend(['--from-opf', path_tmp_opf])
-            if has_cover:
-                command.extend(['--cover', os.path.join(os.path.dirname(file_path), 'cover.jpg')])
-            quotes_index = 3
+                if has_cover:
+                    quotes.append(6)
+                    command.extend(['--cover', os.path.join(os.path.dirname(file_path), 'cover.jpg')])
+                    quotes_index = 7
             if config.config_calibre:
-                parameters = config.config_calibre.split(" ")
-                for param in parameters:
-                    command.append(param)
-                    quotes.append(quotes_index)
-                    quotes_index += 1
-
+                parameters = re.findall(r"(--[\w-]+)(?:(\s(?:(\".+\")|(?:.+?)))(?:\s|$))?",
+                                        config.config_calibre, re.IGNORECASE | re.UNICODE)
+                if parameters:
+                    for param in parameters:
+                        command.append(strip_whitespaces(param[0]))
+                        quotes_index += 1
+                        if param[1] != "":
+                            parsed = strip_whitespaces(param[1]).strip("\"")
+                            command.append(parsed)
+                            quotes.append(quotes_index)
+                            quotes_index += 1
             p = process_open(command, quotes, newlines=False)
         except OSError as e:
             return 1, N_("Ebook-converter failed: %(error)s", error=e)
